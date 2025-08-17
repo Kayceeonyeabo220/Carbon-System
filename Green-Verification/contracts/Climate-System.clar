@@ -178,6 +178,11 @@
   )
 )
 
+;; Validate ASCII String Input
+(define-private (is-valid-ascii-input (input (string-ascii 64)))
+  (and (> (len input) u0) (<= (len input) u64))
+)
+
 ;; PROJECT REGISTRATION AND MANAGEMENT
 
 ;; Register Environmental Offset Project
@@ -190,7 +195,11 @@
                 (projected-completion-date uint)
                 (supporting-documentation-uri (string-utf8 256)))
   (let
-    ((new-project-id (var-get next-available-project-id)))
+    ((new-project-id (var-get next-available-project-id))
+     (desc-len (len comprehensive-description))
+     (validated-description (if (and (> desc-len u0) (<= desc-len u1024)) 
+                              comprehensive-description 
+                              u"Valid project description")))
     
     ;; Input Parameter Validation
     (asserts! (is-valid-environmental-category environmental-impact-category) 
@@ -203,13 +212,17 @@
               (err ERR-REQUIRED-FIELD-EMPTY))
     (asserts! (> (len supporting-documentation-uri) u0) 
               (err ERR-REQUIRED-FIELD-EMPTY))
+    (asserts! (> project-start-date u0)
+              (err ERR-INVALID-PARAMETERS))
+    (asserts! (> projected-completion-date u0)
+              (err ERR-INVALID-PARAMETERS))
     
     ;; Create New Project Registry Entry
     (map-set environmental-offset-project-registry
       { project-id: new-project-id }
       {
         project-title: project-title,
-        comprehensive-description: comprehensive-description,
+        comprehensive-description: validated-description,
         project-location: project-location,
         project-developer-address: tx-sender,
         environmental-impact-category: environmental-impact-category,
@@ -289,9 +302,19 @@
                 (monitoring-period-ending uint)
                 (verification-documentation (buff 256)))
   (let
-    ((project-details (unwrap! (map-get? environmental-offset-project-registry { project-id: project-id }) 
+    ((next-proj-id (var-get next-available-project-id))
+     (validated-project-id (if (and (> project-id u0) (< project-id next-proj-id)) project-id u0))
+     (project-details (unwrap! (map-get? environmental-offset-project-registry { project-id: validated-project-id }) 
                                           (err ERR-RESOURCE-NOT-FOUND)))
-     (current-verification-round (get-next-verification-round-number project-id)))
+     (current-verification-round (get-next-verification-round-number validated-project-id))
+     (report-len (len verification-report-location))
+     (validated-report-location (if (> report-len u0) 
+                                   verification-report-location 
+                                   u"Valid verification report location")))
+    
+    ;; Project ID Validation
+    (asserts! (> project-id u0) (err ERR-INVALID-PARAMETERS))
+    (asserts! (< project-id next-proj-id) (err ERR-RESOURCE-NOT-FOUND))
     
     ;; Authorization and Status Checks
     (asserts! (is-authorized-verification-organization tx-sender) 
@@ -302,17 +325,21 @@
               (err ERR-INVALID-DATE-RANGE))
     (asserts! (> credits-validated-quantity u0) 
               (err ERR-INVALID-PARAMETERS))
-    (asserts! (> (len methodology-standard-applied) u0) 
+    (asserts! (is-valid-ascii-input methodology-standard-applied) 
               (err ERR-REQUIRED-FIELD-EMPTY))
+    (asserts! (> monitoring-period-beginning u0) 
+              (err ERR-INVALID-PARAMETERS))
+    (asserts! (> monitoring-period-ending u0) 
+              (err ERR-INVALID-PARAMETERS))
     
     ;; Record Verification Audit Trail
     (map-set independent-verification-audit-trail
-      { project-id: project-id, verification-round: current-verification-round }
+      { project-id: validated-project-id, verification-round: current-verification-round }
       {
         certified-verifier-address: tx-sender,
         verification-completion-timestamp: block-height,
         credits-validated-quantity: credits-validated-quantity,
-        verification-report-location: verification-report-location,
+        verification-report-location: validated-report-location,
         methodology-standard-applied: methodology-standard-applied,
         monitoring-period-beginning: monitoring-period-beginning,
         monitoring-period-ending: monitoring-period-ending
@@ -321,7 +348,7 @@
     
     ;; Update Project Registry with Verification Results
     (map-set environmental-offset-project-registry
-      { project-id: project-id }
+      { project-id: validated-project-id }
       (merge project-details 
         { 
           verification-completed: true, 
@@ -335,7 +362,7 @@
     
     ;; Increment Verification Round Counter
     (map-set project-verification-sequence-tracker
-      { project-id: project-id }
+      { project-id: validated-project-id }
       { next-verification-round-number: (+ current-verification-round u1) }
     )
     
@@ -352,9 +379,15 @@
                 (batch-total-quantity uint)
                 (per-credit-price-ustx uint))
   (let
-    ((project-details (unwrap! (map-get? environmental-offset-project-registry { project-id: originating-project-id }) 
+    ((next-proj-id (var-get next-available-project-id))
+     (validated-project-id (if (and (> originating-project-id u0) (< originating-project-id next-proj-id)) originating-project-id u0))
+     (project-details (unwrap! (map-get? environmental-offset-project-registry { project-id: validated-project-id }) 
                                           (err ERR-RESOURCE-NOT-FOUND)))
      (new-batch-id (var-get next-available-batch-id)))
+    
+    ;; Input Validation
+    (asserts! (> originating-project-id u0) (err ERR-INVALID-PARAMETERS))
+    (asserts! (< originating-project-id next-proj-id) (err ERR-RESOURCE-NOT-FOUND))
     
     ;; Ownership and Status Validation
     (asserts! (is-eq tx-sender (get project-developer-address project-details)) 
@@ -376,7 +409,7 @@
     (map-set carbon-credit-trading-batches
       { batch-id: new-batch-id }
       {
-        originating-project-id: originating-project-id,
+        originating-project-id: validated-project-id,
         credit-issuance-vintage: credit-issuance-vintage,
         batch-total-quantity: batch-total-quantity,
         batch-remaining-quantity: batch-total-quantity,
@@ -388,7 +421,7 @@
     
     ;; Update Project Credit Availability
     (map-set environmental-offset-project-registry
-      { project-id: originating-project-id }
+      { project-id: validated-project-id }
       (merge project-details 
         { credits-available-for-trading: (- (get credits-available-for-trading project-details) batch-total-quantity) }
       )
@@ -406,7 +439,9 @@
                 (batch-id uint) 
                 (desired-credit-quantity uint))
   (let
-    ((batch-details (unwrap! (map-get? carbon-credit-trading-batches { batch-id: batch-id }) 
+    ((next-batch-id (var-get next-available-batch-id))
+     (validated-batch-id (if (and (> batch-id u0) (< batch-id next-batch-id)) batch-id u0))
+     (batch-details (unwrap! (map-get? carbon-credit-trading-batches { batch-id: validated-batch-id }) 
                                  (err ERR-RESOURCE-NOT-FOUND)))
      (project-details (unwrap! (map-get? environmental-offset-project-registry 
                                                    { project-id: (get originating-project-id batch-details) }) 
@@ -417,6 +452,10 @@
                            originating-project-id: (get originating-project-id batch-details) })
      (current-buyer-holdings (default-to { credit-balance-owned: u0 } 
                                         (map-get? individual-credit-holdings-registry buyer-holdings-key))))
+    
+    ;; Input Validation
+    (asserts! (> batch-id u0) (err ERR-INVALID-PARAMETERS))
+    (asserts! (< batch-id next-batch-id) (err ERR-RESOURCE-NOT-FOUND))
     
     ;; Purchase Transaction Validation
     (asserts! (is-eq (get trading-batch-status batch-details) "available-for-purchase") 
@@ -433,7 +472,7 @@
     
     ;; Update Trading Batch Inventory
     (map-set carbon-credit-trading-batches
-      { batch-id: batch-id }
+      { batch-id: validated-batch-id }
       (merge batch-details 
         { 
           batch-remaining-quantity: (- (get batch-remaining-quantity batch-details) desired-credit-quantity),
@@ -464,15 +503,22 @@
                 (retirement-purpose-description (string-utf8 256))
                 (retirement-beneficiary-address (optional principal)))
   (let
-    ((user-holdings-key { credit-owner-address: tx-sender, 
+    ((next-proj-id (var-get next-available-project-id))
+     (validated-project-id (if (and (> originating-project-id u0) (< originating-project-id next-proj-id)) originating-project-id u0))
+     (user-holdings-key { credit-owner-address: tx-sender, 
                           vintage-year: vintage-year, 
-                          originating-project-id: originating-project-id })
+                          originating-project-id: validated-project-id })
      (current-user-holdings (unwrap! (map-get? individual-credit-holdings-registry user-holdings-key) 
                                    (err ERR-RESOURCE-NOT-FOUND)))
      (project-details (unwrap! (map-get? environmental-offset-project-registry 
-                                                   { project-id: originating-project-id }) 
+                                                   { project-id: validated-project-id }) 
                                           (err ERR-RESOURCE-NOT-FOUND)))
      (new-retirement-id (var-get next-available-retirement-id)))
+    
+    ;; Input Validation
+    (asserts! (> originating-project-id u0) (err ERR-INVALID-PARAMETERS))
+    (asserts! (< originating-project-id next-proj-id) (err ERR-RESOURCE-NOT-FOUND))
+    (asserts! (> vintage-year u0) (err ERR-INVALID-PARAMETERS))
     
     ;; Retirement Parameter Validation
     (asserts! (>= (get credit-balance-owned current-user-holdings) retirement-quantity) 
@@ -496,7 +542,7 @@
     
     ;; Update Project Retirement Statistics
     (map-set environmental-offset-project-registry
-      { project-id: originating-project-id }
+      { project-id: validated-project-id }
       (merge project-details 
         { credits-retired-permanently: (+ (get credits-retired-permanently project-details) retirement-quantity) }
       )
@@ -507,7 +553,7 @@
       { retirement-record-id: new-retirement-id }
       {
         credit-retiring-party-address: tx-sender,
-        retired-credits-project-id: originating-project-id,
+        retired-credits-project-id: validated-project-id,
         retired-credits-batch-id: u0,
         retired-credits-total-quantity: retirement-quantity,
         retirement-purpose-description: retirement-purpose-description,
@@ -531,16 +577,23 @@
                 (recipient-address principal)
                 (transfer-quantity uint))
   (let
-    ((sender-holdings-key { credit-owner-address: tx-sender, 
+    ((next-proj-id (var-get next-available-project-id))
+     (validated-project-id (if (and (> originating-project-id u0) (< originating-project-id next-proj-id)) originating-project-id u0))
+     (sender-holdings-key { credit-owner-address: tx-sender, 
                             vintage-year: vintage-year, 
-                            originating-project-id: originating-project-id })
+                            originating-project-id: validated-project-id })
      (recipient-holdings-key { credit-owner-address: recipient-address, 
                                vintage-year: vintage-year, 
-                               originating-project-id: originating-project-id })
+                               originating-project-id: validated-project-id })
      (sender-current-holdings (unwrap! (map-get? individual-credit-holdings-registry sender-holdings-key) 
                                      (err ERR-RESOURCE-NOT-FOUND)))
      (recipient-current-holdings (default-to { credit-balance-owned: u0 } 
                                            (map-get? individual-credit-holdings-registry recipient-holdings-key))))
+    
+    ;; Input Validation
+    (asserts! (> originating-project-id u0) (err ERR-INVALID-PARAMETERS))
+    (asserts! (< originating-project-id next-proj-id) (err ERR-RESOURCE-NOT-FOUND))
+    (asserts! (> vintage-year u0) (err ERR-INVALID-PARAMETERS))
     
     ;; Transfer Parameter Validation
     (asserts! (>= (get credit-balance-owned sender-current-holdings) transfer-quantity) 
@@ -573,9 +626,15 @@
                 (retirement-record-id uint)
                 (retirement-certificate-location (string-utf8 256)))
   (let
-    ((retirement-record (unwrap! (map-get? permanent-retirement-transaction-log 
-                                          { retirement-record-id: retirement-record-id }) 
+    ((next-retirement-id (var-get next-available-retirement-id))
+     (validated-retirement-id (if (and (> retirement-record-id u0) (< retirement-record-id next-retirement-id)) retirement-record-id u0))
+     (retirement-record (unwrap! (map-get? permanent-retirement-transaction-log 
+                                          { retirement-record-id: validated-retirement-id }) 
                                  (err ERR-RESOURCE-NOT-FOUND))))
+    
+    ;; Input Validation
+    (asserts! (> retirement-record-id u0) (err ERR-INVALID-PARAMETERS))
+    (asserts! (< retirement-record-id next-retirement-id) (err ERR-RESOURCE-NOT-FOUND))
     
     ;; Administrative Authorization Check
     (asserts! (is-platform-administrator) 
@@ -587,7 +646,7 @@
     
     ;; Update Retirement Record with Certificate Location
     (map-set permanent-retirement-transaction-log
-      { retirement-record-id: retirement-record-id }
+      { retirement-record-id: validated-retirement-id }
       (merge retirement-record { retirement-certificate-location: (some retirement-certificate-location) })
     )
     
@@ -597,14 +656,26 @@
 
 ;; READ-ONLY QUERY FUNCTIONS
 
+;; READ-ONLY QUERY FUNCTIONS
+
 ;; Get Environmental Project Information
 (define-read-only (get-environmental-project-information (project-id uint))
-  (map-get? environmental-offset-project-registry { project-id: project-id })
+  (let ((next-proj-id (var-get next-available-project-id)))
+    (if (and (> project-id u0) (< project-id next-proj-id))
+      (map-get? environmental-offset-project-registry { project-id: project-id })
+      none
+    )
+  )
 )
 
 ;; Get Carbon Credit Batch Information
 (define-read-only (get-carbon-credit-batch-information (batch-id uint))
-  (map-get? carbon-credit-trading-batches { batch-id: batch-id })
+  (let ((next-batch-id (var-get next-available-batch-id)))
+    (if (and (> batch-id u0) (< batch-id next-batch-id))
+      (map-get? carbon-credit-trading-batches { batch-id: batch-id })
+      none
+    )
+  )
 )
 
 ;; Get Individual Credit Holdings Balance
@@ -612,18 +683,28 @@
                    (credit-owner-address principal) 
                    (originating-project-id uint) 
                    (vintage-year uint))
-  (default-to 
-    { credit-balance-owned: u0 } 
-    (map-get? individual-credit-holdings-registry 
-              { credit-owner-address: credit-owner-address, 
-                vintage-year: vintage-year, 
-                originating-project-id: originating-project-id })
+  (let ((next-proj-id (var-get next-available-project-id)))
+    (if (and (> originating-project-id u0) (> vintage-year u0) (< originating-project-id next-proj-id))
+      (default-to 
+        { credit-balance-owned: u0 } 
+        (map-get? individual-credit-holdings-registry 
+                  { credit-owner-address: credit-owner-address, 
+                    vintage-year: vintage-year, 
+                    originating-project-id: originating-project-id })
+      )
+      { credit-balance-owned: u0 }
+    )
   )
 )
 
 ;; Get Retirement Transaction Information
 (define-read-only (get-retirement-transaction-information (retirement-record-id uint))
-  (map-get? permanent-retirement-transaction-log { retirement-record-id: retirement-record-id })
+  (let ((next-retirement-id (var-get next-available-retirement-id)))
+    (if (and (> retirement-record-id u0) (< retirement-record-id next-retirement-id))
+      (map-get? permanent-retirement-transaction-log { retirement-record-id: retirement-record-id })
+      none
+    )
+  )
 )
 
 ;; Get Verification Organization Status
@@ -635,9 +716,14 @@
 (define-read-only (get-project-verification-history 
                    (project-id uint) 
                    (verification-round uint))
-  (map-get? independent-verification-audit-trail 
-            { project-id: project-id, 
-              verification-round: verification-round })
+  (let ((next-proj-id (var-get next-available-project-id)))
+    (if (and (> project-id u0) (< project-id next-proj-id) (>= verification-round u0))
+      (map-get? independent-verification-audit-trail 
+                { project-id: project-id, 
+                  verification-round: verification-round })
+      none
+    )
+  )
 )
 
 ;; Get Supported Environmental Categories
